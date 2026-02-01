@@ -16,8 +16,6 @@
 - **자막 추출**: YouTube Transcript API
 - **LLM**: Google Generative AI (Gemini)
 
-## 📦 설치 및 실행 방법
-
 ## 📦 Installation & Setup
 
 ### 1. Clone the repository
