@@ -1,18 +1,19 @@
 import streamlit as st
 import re
-import google.generativeai as genai
+import time
+import json
+import datetime
+from google import genai
+from google.genai import types
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.formatters import TextFormatter
+from ics import Calendar, Event
 
 # --- Helper Functions ---
 
 def extract_video_id(url):
     """
     Extracts the YouTube Video ID from various URL formats.
-    Supported formats:
-    - https://www.youtube.com/watch?v=VIDEO_ID
-    - https://youtu.be/VIDEO_ID
-    - https://www.youtube.com/embed/VIDEO_ID
     """
     regex = r"(?:v=|/)([0-9A-Za-z_-]{11}).*"
     match = re.search(regex, url)
@@ -23,11 +24,10 @@ def extract_video_id(url):
 def get_transcript_text(video_id):
     """
     Fetches the transcript for a given video ID using a robust fallback strategy.
-    Prioritizes: Manual Ko/En -> Auto Ko/En -> Any (Translated to Ko).
     """
     try:
-        # Get the list of all available transcripts
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        api = YouTubeTranscriptApi()
+        transcript_list = api.list_transcripts(video_id)
         
         transcript = None
         
@@ -46,71 +46,145 @@ def get_transcript_text(video_id):
                 except:
                     return None
 
-        # Fetch the actual transcript data
         fetched_transcript = transcript.fetch()
-        
-        # Format to text
         formatter = TextFormatter()
         return formatter.format_transcript(fetched_transcript)
 
     except Exception as e:
-        # print(f"Error fetching transcript for {video_id}: {e}")
         return None
 
-def generate_coaching_report(api_key, full_transcript):
+def clean_json_string(json_str):
     """
-    Sends the transcript to Google Gemini to generate the lifestyle coaching report.
+    Cleans the JSON string by removing markdown code blocks if present.
     """
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+    cleaned = json_str.strip()
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:]
+    if cleaned.startswith("```"):
+        cleaned = cleaned[3:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    return cleaned.strip()
 
-        prompt = f"""
-        You are an expert Lifestyle Coach and Productivity Consultant.
-        The user shares YouTube videos they found inspiring.
-        Your task is to analyze the following video transcripts and provide a structured coaching plan.
+def generate_coaching_data(api_key, full_transcript):
+    """
+    Sends the transcript to Google Gemini to generate the lifestyle coaching data in JSON.
+    """
+    client = genai.Client(api_key=api_key)
 
-        **Language Requirement:** The final response **MUST be written in Korean (한국어)**.
+    prompt = f"""
+    You are an expert Lifestyle Coach and Productivity Consultant.
+    The user shares YouTube videos they found inspiring.
+    Your task is to analyze the video transcripts and translate the insights into a concrete, actionable schedule and resource list.
 
-        **Output Structure:**
-        1. **핵심 통찰 (Core Insight):** What is the one key philosophy or lesson from these videos? (1 sentence)
-        2. **주요 요약 (Key Takeaways):** Summarize 3 major points relevant to lifestyle or mindset.
-        3. **실천 가이드 (Action Plan):** Provide 3 concrete, actionable steps the user can do *tomorrow* to apply this knowledge.
-        4. **동기 부여 (Motivation):** A short, encouraging quote or message based on the content.
+    **Language Requirement:**
+    - The content MUST be in **Korean (한국어)**.
+    - JSON keys must remain in English as specified below.
 
-        **Video Transcripts:**
-        {full_transcript}
-        """
+    **Output Format:**
+    - You must return ONLY a valid JSON object.
+    - Do not include markdown formatting like ```json ... ``` at the start or end. Just the raw JSON.
 
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"Error connecting to Gemini API: {str(e)}"
+    **JSON Structure:**
+    {{
+      "analysis": "A comprehensive analysis of the video's logic, philosophy, and mindset. Summarize the key points clearly. (Korean)",
+      "routine_items": [
+        {{
+            "activity": "Name of the activity (e.g., Morning Meditation)",
+            "time": "HH:MM (24-hour format, e.g., 07:00)",
+            "duration_minutes": 10,
+            "notes": "Specific instructions or focus points"
+        }}
+      ],
+      "recommended_resources": [
+        {{
+            "item_name": "Name of book, tool, or concept",
+            "type": "Book / Tool / App / Video / Etc"
+        }}
+      ]
+    }}
+
+    **Video Transcripts:**
+    {full_transcript}
+    """
+
+    max_retries = 3
+    base_delay = 5
+
+    for attempt in range(max_retries):
+        try:
+            # Request explicit JSON response if supported by the model, otherwise prompt relies on text
+            # Using 'application/json' mime type hint for Gemini 1.5/2.0 models if available
+            response = client.models.generate_content(
+                model='gemini-2.0-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type='application/json')
+            )
+            return response.text
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                wait_time = base_delay * (2 ** attempt)
+                match = re.search(r"retry in (\d+(?:\.\d+)?)s", error_str)
+                if match:
+                    wait_time = float(match.group(1)) + 1.0
+                time.sleep(wait_time)
+                continue
+            return None
+            
+    return None
+
+def create_ics_file(routine_items):
+    """
+    Generates an ICS (iCalendar) file content from routine items.
+    Defaults to 'Tomorrow'.
+    """
+    c = Calendar()
+    today = datetime.date.today()
+    tomorrow = today + datetime.timedelta(days=1)
+    
+    for item in routine_items:
+        try:
+            # Parse time "HH:MM"
+            h, m = map(int, item['time'].split(':'))
+            start_dt = datetime.datetime.combine(tomorrow, datetime.time(hour=h, minute=m))
+            duration = datetime.timedelta(minutes=int(item.get('duration_minutes', 30)))
+            
+            e = Event()
+            e.name = item['activity']
+            e.begin = start_dt
+            e.duration = duration
+            e.description = item.get('notes', '')
+            c.events.add(e)
+        except Exception:
+            continue # Skip malformed items
+
+    return c.serialize()
 
 # --- Streamlit UI ---
 
-st.set_page_config(page_title="YouTube Lifestyle Coach", page_icon="🧘", layout="wide")
+st.set_page_config(page_title="Action-Oriented Lifestyle Agent", page_icon="⚡", layout="wide")
 
-# Sidebar for API Key
+# Sidebar
 with st.sidebar:
     st.header("⚙️ 설정 (Settings)")
-    api_key = st.text_input("Google API Key 입력", type="password", help="Get your API key from https://aistudio.google.com/")
+    api_key = st.text_input("Google API Key 입력", type="password", help="https://aistudio.google.com/")
     st.markdown("---")
-    st.info("이 앱은 YouTube 영상의 자막을 분석하여 맞춤형 라이프스타일 코칭을 제공합니다.")
+    st.info("YouTube 영상의 지혜를 내일의 스케줄로 만들어드립니다.")
 
-# Main Content
-st.title("🧘 YouTube Driven Lifestyle Coach")
-st.subheader("powered by Google Gemini")
+# Main Header
+st.title("⚡ Action-Oriented Lifestyle Agent")
+st.subheader("YouTube Wisdom → Concrete Action")
 
 st.markdown("""
 영감을 받은 YouTube 영상 링크를 입력하세요.  
-Gemini가 내용을 분석하여 **핵심 통찰**과 **실천 가이드**를 드립니다.
+**분석 리포트**, **구체적인 스케줄(.ics)**, 그리고 **실행 도구**를 제공합니다.
 """)
 
 # Input Area
 video_urls_input = st.text_area("YouTube URL 입력 (한 줄에 하나씩)", height=150, placeholder="https://www.youtube.com/watch?v=...\nhttps://youtu.be/...")
 
-if st.button("Analyze & Coach Me ✨", type="primary"):
+if st.button("Generate Action Plan 🚀", type="primary"):
     if not api_key:
         st.error("⚠️ Google API Key를 사이드바에 입력해주세요.")
     elif not video_urls_input.strip():
@@ -134,9 +208,7 @@ if st.button("Analyze & Coach Me ✨", type="primary"):
                     all_transcripts += f"\n\n--- Video ID: {video_id} ---\n{transcript}"
                     valid_video_count += 1
                 else:
-                    st.warning(f"⚠️ 자막을 가져올 수 없습니다: {url} (자막이 없거나 접근이 제한됨)")
-            else:
-                st.warning(f"⚠️ 유효하지 않은 URL입니다: {url}")
+                    st.warning(f"⚠️ 자막 실패: {url}")
             
             progress_bar.progress((i + 1) / len(urls))
 
@@ -144,13 +216,73 @@ if st.button("Analyze & Coach Me ✨", type="primary"):
         progress_bar.empty()
 
         if valid_video_count > 0:
-            with st.spinner("🤖 Gemini가 영상을 분석하고 코칭 리포트를 작성 중입니다..."):
-                report = generate_coaching_report(api_key, all_transcripts)
+            with st.spinner("🤖 Gemini가 인사이트를 실행 계획으로 변환 중입니다..."):
+                raw_response = generate_coaching_data(api_key, all_transcripts)
             
-            st.divider()
-            st.markdown("## 📋 라이프스타일 코칭 리포트")
-            st.markdown(report)
-            
-            st.success("분석이 완료되었습니다! 오늘 하루도 성장하세요! 🌱")
+            if raw_response:
+                try:
+                    # Clean and Parse JSON
+                    cleaned_json = clean_json_string(raw_response)
+                    data = json.loads(cleaned_json)
+                    
+                    st.success("분석 완료! 아래 탭에서 결과를 확인하세요.")
+                    st.divider()
+
+                    # Tabs
+                    tab1, tab2, tab3 = st.tabs(["📊 분석 리포트", "🗓️ 내 스케줄", "🔗 관련 자료"])
+
+                    # Tab 1: Analysis
+                    with tab1:
+                        st.markdown("### 🧠 핵심 로직 및 마인드셋")
+                        st.write(data.get("analysis", "분석 내용이 없습니다."))
+
+                    # Tab 2: Schedule & ICS
+                    with tab2:
+                        st.markdown("### ⚡ 내일의 실행 루틴")
+                        routines = data.get("routine_items", [])
+                        
+                        if routines:
+                            # Display as a nicely formatted list or table
+                            for item in routines:
+                                with st.container():
+                                    cols = st.columns([1, 4, 2])
+                                    cols[0].markdown(f"**{item.get('time', '??:??')}**")
+                                    cols[1].markdown(f"**{item.get('activity')}**")
+                                    cols[2].caption(f"{item.get('duration_minutes')} min | {item.get('notes')}")
+                                    st.divider()
+                            
+                            # Generate ICS
+                            ics_content = create_ics_file(routines)
+                            st.download_button(
+                                label="📅 캘린더 파일 다운로드 (.ics)",
+                                data=ics_content,
+                                file_name="my_lifestyle_routine.ics",
+                                mime="text/calendar"
+                            )
+                        else:
+                            st.info("추출된 루틴이 없습니다.")
+
+                    # Tab 3: Resources
+                    with tab3:
+                        st.markdown("### 🛠️ 추천 도구 및 자료")
+                        resources = data.get("recommended_resources", [])
+                        
+                        if resources:
+                            for res in resources:
+                                name = res.get("item_name", "Unknown")
+                                r_type = res.get("type", "Resource")
+                                search_url = f"https://www.google.com/search?q={name.replace(' ', '+')}"
+                                
+                                st.markdown(f"- **[{r_type}] {name}**")
+                                st.link_button(f"🔍 '{name}' 검색하기", search_url)
+                        else:
+                            st.info("추천된 자료가 없습니다.")
+
+                except json.JSONDecodeError:
+                    st.error("데이터 변환 중 오류가 발생했습니다. (JSON Parsing Error)")
+                    with st.expander("Raw Response (Debug)"):
+                        st.text(raw_response)
+            else:
+                st.error("API 응답을 받지 못했습니다.")
         else:
-            st.error("분석할 수 있는 영상 내용이 없습니다. URL과 자막 여부를 확인해주세요.")
+            st.error("분석할 수 있는 자막이 없습니다.")
