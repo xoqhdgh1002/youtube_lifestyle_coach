@@ -26,8 +26,9 @@ def get_transcript_text(video_id):
     Fetches the transcript for a given video ID using a robust fallback strategy.
     """
     try:
+        # Instantiate the API client (required for installed version 1.2.4)
         api = YouTubeTranscriptApi()
-        transcript_list = api.list_transcripts(video_id)
+        transcript_list = api.list(video_id)
         
         transcript = None
         
