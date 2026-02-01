@@ -18,23 +18,35 @@
 
 ## 📦 설치 및 실행 방법
 
-### 1. 프로젝트 복제 또는 디렉토리 이동
+## 📦 Installation & Setup
+
+### 1. Clone the repository
 ```bash
+git clone https://github.com/yourusername/youtube_lifestyle_coach.git
 cd youtube_lifestyle_coach
 ```
 
-### 2. 가상환경 생성 (권장)
+### 2. Quick Setup (Recommended)
+We provide a convenient script to set up the environment and install dependencies automatically.
+
 ```bash
+./setup.sh
+```
+*Note: You might need to make it executable first with `chmod +x setup.sh`*
+
+### 3. Manual Setup
+If you prefer to set it up manually:
+
+```bash
+# Create virtual environment
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
-```
 
-### 3. 필수 패키지 설치
-```bash
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 4. 앱 실행
+### 4. Run the App
 ```bash
 streamlit run app.py
 ```
